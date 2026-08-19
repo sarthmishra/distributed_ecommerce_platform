@@ -59,7 +59,7 @@ public class InventoryService {
                 .collect(Collectors.toList());
     }
 
-    @Transactional
+    @Transactional(noRollbackFor = InsufficientStockException.class)
     public ProductResponse reserveStock(String sku, int quantity) {
         // change: findBySkuWithLock instead of findBySku - takes a row lock so two
         // concurrent reservations for the same SKU are serialized, not raced

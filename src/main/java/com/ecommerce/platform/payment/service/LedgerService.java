@@ -32,11 +32,14 @@ public class LedgerService {
 
     @Transactional
     public Account createAccount(String userEmail, AccountType accountType) {
-        String accountNumber = "ACC-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
-        Account account = new Account(null, accountNumber, userEmail, accountType, "INR");
-        Account savedAccount = accountRepository.save(account);
-        log.info("Created ledger account {} ({}) for {}", savedAccount.getAccountNumber(), accountType, userEmail);
-        return savedAccount;
+        return accountRepository.findByUserEmailAndAccountType(userEmail, accountType)
+                .orElseGet(() -> {
+                    String accountNumber = "ACC-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+                    Account account = new Account(null, accountNumber, userEmail, accountType, "INR");
+                    Account savedAccount = accountRepository.save(account);
+                    log.info("Created ledger account {} ({}) for {}", savedAccount.getAccountNumber(), accountType, userEmail);
+                    return savedAccount;
+                });
     }
 
     @Transactional(readOnly = true)
