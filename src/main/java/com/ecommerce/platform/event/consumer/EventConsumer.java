@@ -2,9 +2,12 @@ package com.ecommerce.platform.event.consumer;
 
 import com.ecommerce.platform.event.config.KafkaTopicConfig;
 import com.ecommerce.platform.event.dto.*;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.support.KafkaHeaders;
+import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -35,5 +38,13 @@ public class EventConsumer {
     @KafkaListener(topics = KafkaTopicConfig.TOPIC_INVENTORY_FAILED, groupId = "ecommerce-group")
     public void consumeInventoryFailed(InventoryFailedEvent event) {
         log.error("Received InventoryFailedEvent: Stock reservation failed for Order {} - {}", event.orderNumber(), event.reason());
+    }
+
+    @KafkaListener(topics = KafkaTopicConfig.TOPIC_ORDERS_DLT, groupId = "ecommerce-dlt-group")
+    public void consumeDeadLetterTopic(ConsumerRecord<String, Object> record,
+                                       @Header(name = KafkaHeaders.DLT_ORIGINAL_TOPIC, required = false) String originalTopic,
+                                       @Header(name = KafkaHeaders.DLT_EXCEPTION_MESSAGE, required = false) String exceptionMessage) {
+        log.error("Received Dead Letter Event on topic [{}] from original topic [{}] with key [{}]. Reason: {}",
+                record.topic(), originalTopic, record.key(), exceptionMessage);
     }
 }
