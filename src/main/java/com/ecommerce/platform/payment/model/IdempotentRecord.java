@@ -23,7 +23,7 @@ public class IdempotentRecord {
     private Integer responseCode;
 
     @Lob
-    @Column(name = "response_body", nullable = false)
+    @Column(name = "response_body", columnDefinition = "TEXT", nullable = false)
     private String responseBody;
 
     @CreationTimestamp

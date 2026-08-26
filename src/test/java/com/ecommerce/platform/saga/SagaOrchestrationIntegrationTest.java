@@ -1,6 +1,5 @@
 package com.ecommerce.platform.saga;
 
-import com.ecommerce.platform.event.config.KafkaTopicConfig;
 import com.ecommerce.platform.event.dto.InventoryFailedEvent;
 import com.ecommerce.platform.event.dto.OrderCreatedEvent;
 import com.ecommerce.platform.event.dto.PaymentCompletedEvent;
@@ -24,7 +23,9 @@ import org.springframework.kafka.test.context.EmbeddedKafka;
 import org.springframework.test.annotation.DirtiesContext;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 
 @SpringBootTest
@@ -88,19 +89,14 @@ public class SagaOrchestrationIntegrationTest {
         );
         sagaOrchestrator.handleOrderCreated(orderCreatedEvent);
 
-        // Verify Payment Completed
-        OrderResponse updatedOrder = orderService.getOrderByNumber(order.orderNumber());
-        assertEquals(OrderStatus.PAYMENT_COMPLETED, updatedOrder.status());
+        // Await until background saga processes order flow to COMPLETED
+        await().atMost(Duration.ofSeconds(5))
+                .pollInterval(Duration.ofMillis(200))
+                .untilAsserted(() -> {
+                    OrderResponse current = orderService.getOrderByNumber(order.orderNumber());
+                    assertEquals(OrderStatus.COMPLETED, current.status());
+                });
 
-        // Step 3: Trigger Saga Step 2 (PaymentCompletedEvent -> Stock Reservation)
-        PaymentCompletedEvent paymentCompletedEvent = new PaymentCompletedEvent(
-                "TXN-TEST-SAGA", order.orderNumber(), order.customerEmail(), order.totalAmount()
-        );
-        sagaOrchestrator.handlePaymentCompleted(paymentCompletedEvent);
-
-        // Verify Order Completed and Stock Depleted
-        OrderResponse finalOrder = orderService.getOrderByNumber(order.orderNumber());
-        assertEquals(OrderStatus.COMPLETED, finalOrder.status());
         assertEquals(3, inventoryService.getProductBySku(productSku).stockQuantity());
     }
 
@@ -124,7 +120,7 @@ public class SagaOrchestrationIntegrationTest {
 
         // Trigger Saga Step 2 (Stock reservation fails for 10 items)
         PaymentCompletedEvent paymentCompletedEvent = new PaymentCompletedEvent(
-                "TXN-TEST-SAGA-FAIL", order.orderNumber(), order.customerEmail(), order.totalAmount()
+                "TXN-TEST-SAGA-FAIL-" + System.currentTimeMillis(), order.orderNumber(), order.customerEmail(), order.totalAmount()
         );
         sagaOrchestrator.handlePaymentCompleted(paymentCompletedEvent);
 
