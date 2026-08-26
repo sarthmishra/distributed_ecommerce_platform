@@ -1,745 +1,517 @@
 # Distributed E-Commerce Platform
 
-A Spring Boot backend demonstrating **event-driven architecture, the Transactional Outbox Pattern, Saga orchestration, Kafka-based asynchronous communication, concurrency-safe inventory management, and a double-entry financial ledger**.
+A Spring Boot backend demonstrating **event-driven architecture, the Transactional Outbox Pattern, Saga orchestration, Kafka-based asynchronous communication, Dead Letter Topic (DLT) retry handling, concurrency-safe inventory management, double-entry ledger accounting, and PostgreSQL persistence**.
 
-The project is currently implemented as a **modular monolith** that uses distributed-system patterns internally. It is designed to model how a real e-commerce backend can coordinate orders, payments, inventory, and asynchronous events reliably.
-
----
-
-## Architecture
-
-```text
-                         REST Client
-                             |
-                             v
-                     +---------------+
-                     | OrderController|
-                     +-------+-------+
-                             |
-                             v
-                     +---------------+
-                     |  OrderService |
-                     +-------+-------+
-                             |
-              +--------------+--------------+
-              |                             |
-              v                             v
-        +-----------+                +-------------+
-        | Orders DB |                | Outbox Table|
-        +-----------+                +------+------+
-                                            |
-                                            v
-                                  +--------------------+
-                                  | Outbox Publisher   |
-                                  | @Scheduled Poller  |
-                                  +---------+----------+
-                                            |
-                                            v
-                                      +-----------+
-                                      |   Kafka   |
-                                      +-----+-----+
-                                            |
-                                            v
-                                  +-------------------+
-                                  | Saga Orchestrator |
-                                  +---------+---------+
-                                            |
-                         +------------------+------------------+
-                         |                                     |
-                         v                                     v
-                  +-------------+                       +-------------+
-                  |   Payment   |                       |  Inventory  |
-                  |   / Ledger  |                       |   Service   |
-                  +------+------+                       +------+------+
-                         |                                     |
-                         v                                     v
-                  Payment Event                         Inventory Event
-                         |                                     |
-                         +------------------+------------------+
-                                            |
-                                            v
-                                      Order Status
-                                       COMPLETED
-```
+The project is implemented as a **modular monolith** that uses distributed-system patterns internally. It is designed to model how an e-commerce backend coordinates orders, payments, inventory, and asynchronous messaging reliably.
 
 ---
 
-## Main Technologies
+## 1. Project Overview
 
-* **Java**
-* **Spring Boot**
-* **Spring Data JPA**
-* **Hibernate**
-* **Apache Kafka**
-* **H2 Database**
-* **Maven**
-* **JUnit 5**
-* **Spring Kafka Test**
-* **Awaitility**
-* **Docker Compose**
+In distributed architectures, managing multi-step business transactions across distinct domain boundaries presents reliability challenges: dual-write inconsistencies, duplicate message deliveries, race conditions during inventory allocation, and lack of distributed ACID transactions.
+
+This project implements a backend solution within a modular monolith structure using proven distributed-system patterns:
+- **Transactional Outbox** to eliminate dual-write hazards between database state and message broker events.
+- **Orchestrated Saga Pattern** to coordinate multi-step transactions across Orders, Payments, and Inventory with compensating refund capabilities.
+- **Pessimistic Locking** on database rows to prevent inventory overselling under high concurrency.
+- **Double-Entry Financial Ledger** ensuring balanced debit/credit accounting for all customer and merchant wallet movements.
+- **Idempotency Guards** at both message-handling and database levels to prevent double-charging or duplicate side-effects from Kafka redeliveries.
+- **Consumer Retry & Dead Letter Topic (DLT)** for resilient failure handling and unprocessable message routing.
 
 ---
 
-## Core Concepts Demonstrated
+## 2. Key Features
 
-### 1. Transactional Outbox Pattern
-
-Creating an order and publishing an event to Kafka are separate operations.
-
-Publishing directly to Kafka after saving the order could create a dual-write problem.
-
-Instead:
-
-```text
-Order creation
-     |
-     +----> Orders table
-     |
-     +----> Outbox table
-```
-
-Both are written inside the same database transaction.
-
-The outbox event is later published asynchronously to Kafka.
-
-```text
-OrderService
-     |
-     v
-Database Transaction
-     |
-     +--> Order
-     |
-     +--> OutboxEvent
-              |
-              v
-     OutboxPublisherService
-              |
-              v
-            Kafka
-```
-
-This means that if Kafka is temporarily unavailable, the event remains stored in the database and can be retried later.
+- **Spring Boot 3 Backend**: Built on Java 21 and Spring Boot 3.4.2.
+- **RESTful Endpoints**: Clean API contracts for product creation, order placement, and ledger account management.
+- **Spring Data JPA & Hibernate**: Entity lifecycle management and customized dialect handling.
+- **Dual Database Strategy**:
+  - **PostgreSQL**: Production-grade relational database for persistent development and integration verification.
+  - **H2 (In-Memory)**: Fast execution environment for unit and component-level testing.
+- **Transactional Outbox Pattern**: Atomic persistence of domain state (`Order`) and events (`OutboxEvent`) in a single database transaction, published to Kafka via a scheduled poller (`OutboxPublisherService`).
+- **Apache Kafka Messaging**: Asynchronous event-driven communication decoupling the order creation, payment, and inventory domains.
+- **Saga Orchestrator**: State-machine orchestration managing the order lifecycle across `PENDING`, `PAYMENT_COMPLETED`, `PAYMENT_FAILED`, `COMPLETED`, and `CANCELLED`.
+- **Compensating Transactions**: Automatic refund execution via ledger reversal when downstream inventory reservation fails.
+- **Pessimistic Concurrency Control**: `@Lock(LockModeType.PESSIMISTIC_WRITE)` to enforce row-level locking on inventory (`SELECT ... FOR UPDATE`).
+- **Double-Entry Financial Ledger**: Immutable journal and ledger entries enforcing zero-sum financial integrity (`Debits == Credits`).
+- **State-Based & Key-Based Idempotency**: Order status checks prevent redundant Saga transitions, while `IdempotencyService` caches API response payloads against idempotency keys.
+- **Kafka Consumer Error Handling**: Spring Kafka `DefaultErrorHandler` configured with fixed backoff retries (3 total attempts) and `DeadLetterPublishingRecoverer` routing failed messages to `orders.dlt` with error headers.
+- **Comprehensive Test Suite**: 18 automated tests spanning unit tests, Spring context integration tests, embedded Kafka message flow tests, retry/DLT tests, real REST end-to-end flow, and live PostgreSQL persistence tests.
 
 ---
 
-## 2. Kafka Event-Driven Communication
+## 3. Architecture
 
-The application uses Kafka topics to communicate between stages of the order workflow.
+```mermaid
+flowchart TD
+    subgraph ClientLayer [Client]
+        Client[HTTP Client / Frontend]
+    end
 
-Current topics include:
+    subgraph OrderDomain [Order Service]
+        Controller[OrderController<br/>POST /api/v1/orders]
+        OrderSvc[OrderService]
+    end
 
-```text
-orders.created
-payments.completed
-payments.failed
-inventory.reserved
-inventory.failed
-orders.dlt
+    subgraph DatabaseLayer [Relational Storage - PostgreSQL / H2]
+        OrderTable[(orders)]
+        OutboxTable[(outbox_events)]
+        InventoryTable[(products)]
+        LedgerTable[(accounts / journal_entries / ledger_entries)]
+        IdempotencyTable[(idempotent_records)]
+    end
+
+    subgraph OutboxWorker [Outbox Relaying]
+        OutboxPublisher[OutboxPublisherService<br/>@Scheduled Poller]
+    end
+
+    subgraph MessagingLayer [Apache Kafka Broker]
+        TopicCreated[orders.created]
+        TopicPaid[payments.completed]
+        TopicPayFailed[payments.failed]
+        TopicReserved[inventory.reserved]
+        TopicInvFailed[inventory.failed]
+        TopicDLT[orders.dlt]
+    end
+
+    subgraph SagaLayer [Saga Orchestration]
+        Saga[SagaOrchestrator]
+        ErrorHandler[DefaultErrorHandler<br/>FixedBackOff: 2 Retries]
+        DLTRecoverer[DeadLetterPublishingRecoverer]
+    end
+
+    subgraph PaymentDomain [Payment & Ledger Subsystem]
+        LedgerSvc[LedgerService]
+    end
+
+    subgraph InventoryDomain [Inventory Subsystem]
+        InventorySvc[InventoryService]
+    end
+
+    %% Client flow
+    Client -->|1. Create Order Request| Controller
+    Controller --> OrderSvc
+
+    %% Atomic local transaction
+    OrderSvc -->|2. Atomic DB Transaction| OrderTable
+    OrderSvc -->|2. Atomic DB Transaction| OutboxTable
+
+    %% Outbox Poller
+    OutboxTable -.->|3. Poll Unprocessed| OutboxPublisher
+    OutboxPublisher -->|4. Publish Event| TopicCreated
+
+    %% Saga Flow Step 1: Payment
+    TopicCreated -->|5. Consume| Saga
+    Saga -->|6. Debit Customer / Credit Merchant| LedgerSvc
+    LedgerSvc --> LedgerTable
+    Saga -->|7a. Payment Success| TopicPaid
+    Saga -->|7b. Payment Failed| TopicPayFailed
+
+    %% Saga Flow Step 2: Inventory
+    TopicPaid -->|8. Consume| Saga
+    Saga -->|9. Reserve Stock with Pessimistic Lock| InventorySvc
+    InventorySvc --> InventoryTable
+    Saga -->|10a. Stock Reserved| TopicReserved
+    Saga -->|10b. Stock Insufficient| TopicInvFailed
+
+    %% Compensation
+    TopicInvFailed -->|11. Trigger Compensation| Saga
+    Saga -->|12. Execute Refund Transfer| LedgerSvc
+
+    %% Error Handling & DLT
+    Saga -.->|Listener Exception| ErrorHandler
+    ErrorHandler -->|Exhausted Retries| DLTRecoverer
+    DLTRecoverer -->|Publish with Headers| TopicDLT
 ```
 
-The main event flow is:
-
-```text
-OrderCreatedEvent
-        |
-        v
-orders.created
-        |
-        v
-Saga Step 1
-        |
-        v
-Payment
-        |
-        v
-PaymentCompletedEvent
-        |
-        v
-payments.completed
-        |
-        v
-Saga Step 2
-        |
-        v
-Inventory Reservation
-```
+> **Note on Architecture**: The project is structured as a **modular monolith** with clear domain separation (`order`, `payment`, `inventory`, `outbox`, `event`, `saga`). It does not deploy domains as independent microservice artifacts; instead, it demonstrates distributed architectural patterns inside a unified Spring Boot application.
 
 ---
 
-## 3. Saga Orchestration
+## 4. Distributed-System Patterns
 
-The application uses a **Saga Orchestrator** rather than attempting to make the entire workflow one database transaction.
+### Transactional Outbox Pattern
+Writing to a database and publishing an event to a message broker cannot be combined in a single ACID transaction without two-phase commit (2PC) protocols, which introduce performance and availability bottlenecks.
+* **Mechanism**: When an order is placed, `OrderService` inserts the `Order` record and an `OutboxEvent` record into the database within the same `@Transactional` boundary.
+* **Guarantee**: If the transaction succeeds, the event is guaranteed to be in the database. `OutboxPublisherService` periodically queries unprocessed events (`processed = false`), publishes them to Kafka, and marks them processed upon broker acknowledgment.
 
-### Successful flow
+### Saga Orchestration Pattern
+Long-running business workflows spanning multiple domains avoid distributed database locks by using an orchestrator that coordinates a series of local transactions:
+1. **Step 1 (Payment)**: On `OrderCreatedEvent`, the orchestrator charges the customer's wallet and updates the order to `PAYMENT_COMPLETED`.
+2. **Step 2 (Inventory Allocation)**: On `PaymentCompletedEvent`, the orchestrator reserves stock for the requested SKU and marks the order `COMPLETED`.
+3. **Compensating Action (Refund)**: If stock reservation fails, an `InventoryFailedEvent` is published. The orchestrator intercepts this event, issues a reverse transfer from the merchant back to the customer, and transitions the order to `CANCELLED`.
 
-```text
-PENDING
-   |
-   v
-Payment
-   |
-   v
-PAYMENT_COMPLETED
-   |
-   v
-Inventory Reservation
-   |
-   v
-COMPLETED
-```
+### Idempotency
+Message brokers provide at-least-once delivery guarantees, meaning duplicate events can occur during network blips or consumer rebalances:
+* **Saga State Guards**: `SagaOrchestrator` checks the current order status prior to processing. `handleOrderCreated` only processes orders in `PENDING` status; `handlePaymentCompleted` only processes orders in `PAYMENT_COMPLETED` status; compensating refunds skip orders that are already `CANCELLED`.
+* **Idempotent API Cache**: `IdempotencyService` records incoming request hashes against a unique `idempotencyKey` in the `idempotent_records` table, returning cached responses for identical duplicate requests.
 
-### Payment failure
+### Pessimistic Concurrency Control
+To prevent overselling when multiple customers concurrently purchase the same item:
+* `ProductRepository.findBySkuWithLock()` executes `@Lock(LockModeType.PESSIMISTIC_WRITE)`.
+* In PostgreSQL, this translates to `SELECT ... FOR UPDATE` (or `FOR NO KEY UPDATE`), preventing race conditions by serializing concurrent updates at the database row level.
 
-```text
-PENDING
-   |
-   v
-Payment Failure
-   |
-   v
-PAYMENT_FAILED
-```
+### Double-Entry Financial Ledger
+Financial movements are tracked using immutable accounting records:
+* Every financial operation creates a `JournalEntry` containing at least two balanced `LedgerEntry` lines: one debit and one credit.
+* Account balances are derived mathematically from ledger entries (`Credits - Debits` for liabilities/wallets, `Debits - Credits` for assets/settlement).
 
-### Inventory failure
-
-If payment succeeds but inventory reservation fails:
-
-```text
-PENDING
-   |
-   v
-PAYMENT_COMPLETED
-   |
-   v
-Inventory Failure
-   |
-   v
-Compensating Refund
-   |
-   v
-CANCELLED
-```
-
-The refund is a **compensating transaction**, because a Saga does not provide a global ACID rollback across separate operations.
+### Kafka Retry & Dead Letter Topic (DLT)
+To handle transient and permanent consumer errors:
+* `KafkaErrorConfig` configures a Spring Kafka `DefaultErrorHandler` with `FixedBackOff(1000L, 2L)` (1 initial attempt + 2 retries, 1-second delay).
+* If all retries fail, `DeadLetterPublishingRecoverer` forwards the unprocessable message to `orders.dlt`.
+* Original metadata is preserved in Kafka headers: `kafka_dlt-original-topic`, `kafka_dlt-exception-message`, and `kafka_dlt-exception-stacktrace`.
 
 ---
 
-## 4. Idempotent Saga Processing
+## 5. Technology Stack
 
-Kafka messages can potentially be delivered more than once.
-
-The Saga therefore uses order state as an idempotency guard.
-
-For example, an `OrderCreatedEvent` should only process an order that is currently:
-
-```text
-PENDING
-```
-
-If the order has already moved to another state, duplicate processing is skipped.
-
-Similarly:
-
-```text
-PaymentCompletedEvent
-```
-
-only proceeds when the order is:
-
-```text
-PAYMENT_COMPLETED
-```
-
-This prevents duplicate payment processing, inventory reservation, or refunds.
+| Category | Technology | Version / Specification |
+| :--- | :--- | :--- |
+| **Language** | Java | OpenJDK 21 |
+| **Framework** | Spring Boot | 3.4.2 |
+| **Data Access** | Spring Data JPA / Hibernate | Hibernate 6 (Spring Boot Starter JPA) |
+| **Message Broker** | Apache Kafka | Spring Kafka 3.3.2 / Confluent Platform 7.5.0 |
+| **Relational Database** | PostgreSQL | PostgreSQL 16 (Alpine Container) |
+| **In-Memory Database** | H2 Database | 2.3.232 (Test scope / default profile) |
+| **Testing** | JUnit 5, Spring Boot Test | JUnit Jupiter 5.11.4 |
+| **Embedded Testing** | Spring Kafka Test, Awaitility | EmbeddedKafka Broker, Awaitility 4.2.2 |
+| **Containerization** | Docker, Docker Compose | Compose file version 3.8 |
+| **Build Tool** | Apache Maven | 3.9+ |
 
 ---
 
-## 5. Double-Entry Financial Ledger
+## 6. Database Architecture
 
-The payment subsystem models financial transfers using ledger entries.
+### Entities
 
-A transfer follows the basic double-entry principle:
+| Entity | Table Name | Purpose | Key Attributes |
+| :--- | :--- | :--- | :--- |
+| **Order** | `orders` | Order state and customer purchase details | `orderNumber`, `customerEmail`, `productSku`, `quantity`, `totalAmount`, `status`, `version` |
+| **Product** | `products` | Product catalog and inventory stock tracking | `sku`, `name`, `price`, `stockQuantity` |
+| **Account** | `accounts` | Double-entry financial account definition | `accountNumber`, `userEmail`, `accountType` (`CUSTOMER_WALLET`, `MERCHANT_REVENUE`, `SYSTEM_SETTLEMENT`) |
+| **JournalEntry** | `journal_entries` | Transaction grouping container | `transactionId`, `description`, `createdAt` |
+| **LedgerEntry** | `ledger_entries` | Individual debit/credit balance line | `entryType` (`DEBIT`, `CREDIT`), `amount`, `account_id`, `journal_entry_id` |
+| **OutboxEvent** | `outbox_events` | Transactional outbox event records | `aggregateType`, `aggregateId`, `eventType`, `payload` (TEXT), `processed` |
+| **IdempotentRecord** | `idempotent_records` | Request/response cache for idempotent operations | `idempotencyKey`, `requestHash`, `responseCode`, `responseBody` (TEXT) |
 
-```text
-Customer Wallet       -₹4000
-Merchant Revenue     +₹4000
---------------------------------
-Net                    ₹0
+### Environment Configuration
+
+* **Default Profile (H2 In-Memory)**: Configured in `src/main/resources/application.yml`. Runs in-memory with `H2Dialect` for rapid development and isolated automated unit/integration test runs.
+* **PostgreSQL Profile (`postgres`)**: Configured in `src/main/resources/application-postgres.yml`. Connects to PostgreSQL using `PostgreSQLDialect` with `hibernate.ddl-auto: update`.
+
+To activate the PostgreSQL profile:
+```bash
+mvn spring-boot:run -Dspring-boot.run.profiles=postgres
 ```
-
-Every financial movement therefore has corresponding debit and credit entries.
-
-The system also uses idempotency records to prevent the same transfer request from being processed multiple times.
-
----
-
-## 6. Concurrency-Safe Inventory
-
-Inventory reservation uses database locking to prevent concurrent requests from overselling the same product.
-
-The important operation uses a pessimistic write lock:
-
-```text
-SELECT product FOR UPDATE
-```
-
-Conceptually:
-
-```text
-Transaction A
-    |
-    v
-Lock Product
-    |
-    v
-Check Stock
-    |
-    v
-Reduce Stock
-    |
-    v
-Commit
-```
-
-Another transaction attempting to modify the same product must wait for the lock.
-
----
-
-# End-to-End Order Flow
-
-A normal order follows this complete path:
-
-```text
-1. Client
-      |
-      | POST /api/v1/orders
-      v
-2. OrderController
-      |
-      v
-3. OrderService
-      |
-      +----------------------+
-      |                      |
-      v                      v
-4. Orders Table        5. Outbox Table
-                             |
-                             v
-6. OutboxPublisherService
-                             |
-                             v
-7. Kafka: orders.created
-                             |
-                             v
-8. SagaOrchestrator
-                             |
-                             v
-9. Payment / Ledger
-                             |
-                             v
-10. Order = PAYMENT_COMPLETED
-                             |
-                             v
-11. Kafka: payments.completed
-                             |
-                             v
-12. SagaOrchestrator
-                             |
-                             v
-13. Inventory Reservation
-                             |
-                             v
-14. Order = COMPLETED
+Or via environment variable:
+```bash
+export SPRING_PROFILES_ACTIVE=postgres
 ```
 
 ---
 
-# Example
+## 7. Kafka & Event Flow
 
-The E2E test creates:
+### Topics
+
+| Topic Name | Producer | Consumer | Payload |
+| :--- | :--- | :--- | :--- |
+| `orders.created` | `OutboxPublisherService` | `SagaOrchestrator`, `EventConsumer` | `OrderCreatedEvent` |
+| `payments.completed` | `SagaOrchestrator` | `SagaOrchestrator`, `EventConsumer` | `PaymentCompletedEvent` |
+| `payments.failed` | `SagaOrchestrator` | `EventConsumer` | `PaymentFailedEvent` |
+| `inventory.reserved` | `SagaOrchestrator` | `EventConsumer` | `InventoryReservedEvent` |
+| `inventory.failed` | `SagaOrchestrator` | `SagaOrchestrator`, `EventConsumer` | `InventoryFailedEvent` |
+| `orders.dlt` | `DeadLetterPublishingRecoverer` | `EventConsumer` | Original event payload with failure headers |
+
+---
+
+## 8. Saga Lifecycle & State Transitions
+
+### Happy Path (Order Success)
 
 ```text
-Product:
-SKU      = LAPTOP-E2E-01
-Price    = ₹2000
-Stock    = 5
-
-Customer:
-priya@example.com
-
-Wallet:
-₹10000
+[POST /api/v1/orders]
+       │
+       ▼
+   (PENDING) ──► OutboxEvent persisted atomically
+       │
+       ▼ [orders.created]
+   Saga Step 1: Debit customer wallet, credit merchant
+       │
+       ▼
+(PAYMENT_COMPLETED)
+       │
+       ▼ [payments.completed]
+   Saga Step 2: Pessimistic lock product SKU & decrement stock
+       │
+       ▼
+  (COMPLETED) ──► [inventory.reserved]
 ```
 
-Then creates an order for:
+### Compensating Failure Path (Insufficient Stock)
 
 ```text
-Quantity = 2
-```
-
-Order value:
-
-```text
-2 × ₹2000 = ₹4000
-```
-
-Expected result:
-
-```text
-Customer balance:
-₹10000 - ₹4000 = ₹6000
-
-Inventory:
-5 - 2 = 3
-
-Order:
-COMPLETED
+[POST /api/v1/orders]
+       │
+       ▼
+   (PENDING)
+       │
+       ▼ [orders.created]
+   Saga Step 1: Payment completes
+       │
+       ▼
+(PAYMENT_COMPLETED)
+       │
+       ▼ [payments.completed]
+   Saga Step 2: Stock check fails (requested > stockQuantity)
+       │
+       ▼ [inventory.failed]
+   Compensating Action: Reverse transfer (Debit merchant, credit customer)
+       │
+       ▼
+  (CANCELLED) ──► Customer balance fully restored
 ```
 
 ---
 
-# Project Structure
+## 9. Automated Testing Suite
+
+The repository contains **18 automated tests** covering all layers of the architecture:
 
 ```text
-src/
-├── main/
-│   ├── java/
-│   │   └── com/ecommerce/platform/
-│   │
-│   │       ├── common/
-│   │       │   ├── dto/
-│   │       │   └── exception/
-│   │       │
-│   │       ├── event/
-│   │       │   ├── config/
-│   │       │   ├── consumer/
-│   │       │   ├── dto/
-│   │       │   └── publisher/
-│   │       │
-│   │       ├── inventory/
-│   │       │   ├── controller/
-│   │       │   ├── dto/
-│   │       │   ├── model/
-│   │       │   ├── repository/
-│   │       │   └── service/
-│   │       │
-│   │       ├── order/
-│   │       │   ├── controller/
-│   │       │   ├── dto/
-│   │       │   ├── model/
-│   │       │   ├── repository/
-│   │       │   └── service/
-│   │       │
-│   │       ├── outbox/
-│   │       │   ├── model/
-│   │       │   ├── repository/
-│   │       │   └── service/
-│   │       │
-│   │       ├── payment/
-│   │       │   ├── controller/
-│   │       │   ├── dto/
-│   │       │   ├── model/
-│   │       │   ├── repository/
-│   │       │   └── service/
-│   │       │
-│   │       └── saga/
-│   │           └── service/
-│   │
-│   └── resources/
-│       └── application.yml
-│
-└── test/
-    └── java/
-        └── com/ecommerce/platform/
-            ├── e2e/
-            ├── event/
-            ├── inventory/
-            ├── order/
-            ├── payment/
-            └── saga/
+-------------------------------------------------------
+ T E S T S
+-------------------------------------------------------
+Running com.ecommerce.platform.inventory.InventoryServiceTest
+Tests run: 4, Failures: 0, Errors: 0, Skipped: 0
+
+Running com.ecommerce.platform.order.OrderServiceTest
+Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+
+Running com.ecommerce.platform.payment.LedgerServiceTest
+Tests run: 3, Failures: 0, Errors: 0, Skipped: 0
+
+Running com.ecommerce.platform.event.KafkaEventDrivenIntegrationTest
+Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+
+Running com.ecommerce.platform.saga.SagaOrchestrationIntegrationTest
+Tests run: 2, Failures: 0, Errors: 0, Skipped: 0
+
+Running com.ecommerce.platform.e2e.OrderCreationEndToEndTest
+Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+
+Running com.ecommerce.platform.event.KafkaRetryAndDltIntegrationTest
+Tests run: 2, Failures: 0, Errors: 0, Skipped: 0
+
+Running com.ecommerce.platform.postgres.PostgresIntegrationTest
+Tests run: 4, Failures: 0, Errors: 0, Skipped: 0
+
+Results:
+Tests run: 18, Failures: 0, Errors: 0, Skipped: 0
 ```
 
----
+### Test Categories
 
-# Important Components
-
-### OrderService
-
-Responsible for:
-
-* Creating orders
-* Calculating order totals
-* Persisting orders
-* Creating `OrderCreatedEvent`
-* Persisting the event into the outbox
-
-The order and outbox event are created in the same transaction.
-
----
-
-### OutboxPublisherService
-
-Responsible for:
-
-* Finding unprocessed outbox events
-* Publishing them to Kafka
-* Marking successfully published events as processed
-
-The publisher runs periodically using Spring scheduling.
+1. **Unit & Domain Tests**:
+   - `InventoryServiceTest`: Product creation, duplicate SKU rejection, and stock reservation boundaries.
+   - `OrderServiceTest`: Order entity creation, calculation, and outbox event staging.
+   - `LedgerServiceTest`: Double-entry accounting integrity, debit/credit journal creation, and balance calculations.
+2. **Kafka Messaging & Reliability Integration Tests**:
+   - `KafkaEventDrivenIntegrationTest`: Verifies outbox event publishing and Kafka topic transmission.
+   - `KafkaRetryAndDltIntegrationTest`: Verifies consumer retry backoff behavior and routing to `orders.dlt` on permanent errors.
+3. **Saga Orchestration Integration Tests**:
+   - `SagaOrchestrationIntegrationTest`: Exercises multi-step happy-path completion and compensating refund flows using an embedded Kafka broker.
+4. **End-to-End REST Test**:
+   - `OrderCreationEndToEndTest`: Issues a real HTTP POST request to `/api/v1/orders` and asserts that the full pipeline (REST $\to$ Order $\to$ Outbox $\to$ Kafka $\to$ Saga $\to$ Payment $\to$ Inventory) executes to `COMPLETED`.
+5. **PostgreSQL Persistence Tests**:
+   - `PostgresIntegrationTest`: Runs against the live PostgreSQL database to verify native table DDL, atomic outbox persistence, pessimistic row locking (`SELECT FOR UPDATE`), ledger transfers, and idempotency record storage.
 
 ---
 
-### EventPublisher
+## 10. Running the Project
 
-Provides the Kafka publishing abstraction used by the application.
+### Prerequisites
+- Java 21 JDK
+- Maven 3.9+
+- Docker & Docker Compose
 
-It publishes events to the appropriate Kafka topic.
-
----
-
-### SagaOrchestrator
-
-Coordinates the asynchronous order workflow.
-
-Responsibilities include:
-
-* Processing `OrderCreatedEvent`
-* Charging the customer
-* Publishing `PaymentCompletedEvent`
-* Handling payment failures
-* Reserving inventory
-* Handling inventory failures
-* Executing compensating refunds
-* Protecting against duplicate event processing
-
----
-
-### InventoryService
-
-Responsible for:
-
-* Product creation
-* Product lookup
-* Stock reservation
-* Concurrency-safe inventory updates
-
-Inventory reservation uses pessimistic database locking.
-
----
-
-### LedgerService
-
-Responsible for:
-
-* Account creation
-* Transfers
-* Ledger entries
-* Balance calculation
-* Financial transaction integrity
-
----
-
-# Testing
-
-The project contains multiple levels of testing.
-
-## Unit Tests
-
-Examples:
-
-```text
-OrderServiceTest
-InventoryServiceTest
-LedgerServiceTest
-```
-
-These test individual business components.
-
-## Integration Tests
-
-Examples:
-
-```text
-SagaOrchestrationIntegrationTest
-KafkaEventDrivenIntegrationTest
-```
-
-These verify larger pieces of the event-driven architecture.
-
-## End-to-End Test
-
-```text
-OrderCreationEndToEndTest
-```
-
-This is the most important wiring test.
-
-It sends a real HTTP request:
-
-```text
-POST /api/v1/orders
-```
-
-and verifies the complete:
-
-```text
-REST
-→ OrderService
-→ Outbox
-→ Kafka
-→ Saga
-→ Payment
-→ Kafka
-→ Inventory
-→ COMPLETED
-```
-
-flow.
-
-It does not directly invoke the Saga orchestrator.
-
----
-
-# Running the Project
-
-## Start dependencies
-
-The project includes Docker Compose configuration.
-
+### 1. Start Infrastructure Dependencies
+Start PostgreSQL, Kafka, ZooKeeper, and Redis:
 ```bash
 docker compose up -d
 ```
 
-## Run the application
-
+Verify the containers are healthy:
 ```bash
-mvn spring-boot:run
+docker compose ps
 ```
 
-The application runs on:
-
-```text
-http://localhost:8080
-```
-
-## Run tests
-
+### 2. Run the Test Suite
+Run all automated unit and integration tests:
 ```bash
 mvn test
 ```
 
-Run the end-to-end test specifically:
-
+Run a specific test class (e.g., PostgreSQL integration test or E2E test):
 ```bash
+mvn test -Dtest=PostgresIntegrationTest
 mvn test -Dtest=OrderCreationEndToEndTest
+mvn test -Dtest=KafkaRetryAndDltIntegrationTest
 ```
+
+### 3. Run the Application
+
+**Using Default In-Memory H2 Database:**
+```bash
+mvn spring-boot:run
+```
+
+**Using PostgreSQL Persistence Profile:**
+```bash
+mvn spring-boot:run -Dspring-boot.run.profiles=postgres
+```
+
+The application starts on `http://localhost:8080`.
 
 ---
 
-# Current Development Database
+## 11. Example Scenarios
 
-The current configuration uses an in-memory H2 database:
+### Scenario A: Successful Order Placement
+
+1. **Initial Setup**:
+   - Product: `SKU = PHONE-15`, Stock = `10`, Price = `₹1,000.00`
+   - Customer Wallet (`alice@example.com`): `₹5,000.00`
+2. **Action**:
+   - Client sends `POST /api/v1/orders` with `{ "customerEmail": "alice@example.com", "productSku": "PHONE-15", "quantity": 2 }`
+3. **Result**:
+   - Order created in `PENDING` status; total = `₹2,000.00`.
+   - Outbox event published to `orders.created`.
+   - Saga initiates payment: Alice debited `₹2,000.00` (balance $\to$ `₹3,000.00`), merchant credited `₹2,000.00`.
+   - Order moves to `PAYMENT_COMPLETED`.
+   - Saga reserves stock: Product stock decremented from `10` to `8`.
+   - Order moves to `COMPLETED`.
+
+### Scenario B: Insufficient Stock Compensating Refund
+
+1. **Initial Setup**:
+   - Product: `SKU = LAPTOP-PRO`, Stock = `1`, Price = `₹2,000.00`
+   - Customer Wallet (`bob@example.com`): `₹10,000.00`
+2. **Action**:
+   - Client sends `POST /api/v1/orders` with `{ "customerEmail": "bob@example.com", "productSku": "LAPTOP-PRO", "quantity": 5 }`
+3. **Result**:
+   - Order created in `PENDING` status; total = `₹10,000.00`.
+   - Saga Step 1 succeeds: Bob debited `₹10,000.00` (balance $\to$ `₹0.00`), Order moves to `PAYMENT_COMPLETED`.
+   - Saga Step 2 fails: Stock check detects only `1` available (needs `5`). `InventoryFailedEvent` is emitted.
+   - Compensating Refund triggered: Merchant debited `₹10,000.00`, Bob credited `₹10,000.00` (balance restored $\to$ `₹10,000.00`).
+   - Order status updated to `CANCELLED`.
+
+---
+
+## 12. Project Structure
 
 ```text
-jdbc:h2:mem:ecommercedb
+src/
+├── main/
+│   ├── java/com/ecommerce/platform/
+│   │   ├── DistributedEcommerceApplication.java
+│   │   ├── common/
+│   │   │   ├── dto/ApiResponse.java
+│   │   │   └── exception/GlobalExceptionHandler.java
+│   │   ├── event/
+│   │   │   ├── config/KafkaTopicConfig.java
+│   │   │   ├── config/KafkaErrorConfig.java
+│   │   │   ├── consumer/EventConsumer.java
+│   │   │   ├── dto/OrderCreatedEvent.java
+│   │   │   ├── dto/PaymentCompletedEvent.java
+│   │   │   ├── dto/PaymentFailedEvent.java
+│   │   │   ├── dto/InventoryReservedEvent.java
+│   │   │   ├── dto/InventoryFailedEvent.java
+│   │   │   └── publisher/EventPublisher.java
+│   │   ├── inventory/
+│   │   │   ├── controller/InventoryController.java
+│   │   │   ├── dto/CreateProductRequest.java
+│   │   │   ├── dto/ProductResponse.java
+│   │   │   ├── model/Product.java
+│   │   │   ├── repository/ProductRepository.java
+│   │   │   └── service/InventoryService.java
+│   │   ├── order/
+│   │   │   ├── controller/OrderController.java
+│   │   │   ├── dto/CreateOrderRequest.java
+│   │   │   ├── dto/OrderResponse.java
+│   │   │   ├── model/Order.java
+│   │   │   ├── model/OrderStatus.java
+│   │   │   ├── repository/OrderRepository.java
+│   │   │   └── service/OrderService.java
+│   │   ├── outbox/
+│   │   │   ├── model/OutboxEvent.java
+│   │   │   ├── repository/OutboxEventRepository.java
+│   │   │   └── service/OutboxPublisherService.java
+│   │   ├── payment/
+│   │   │   ├── controller/LedgerController.java
+│   │   │   ├── dto/AccountResponse.java
+│   │   │   ├── dto/TransferRequest.java
+│   │   │   ├── model/Account.java
+│   │   │   ├── model/AccountType.java
+│   │   │   ├── model/EntryType.java
+│   │   │   ├── model/IdempotentRecord.java
+│   │   │   ├── model/JournalEntry.java
+│   │   │   ├── model/LedgerEntry.java
+│   │   │   ├── repository/AccountRepository.java
+│   │   │   ├── repository/IdempotencyRepository.java
+│   │   │   ├── repository/JournalEntryRepository.java
+│   │   │   ├── repository/LedgerEntryRepository.java
+│   │   │   ├── service/IdempotencyService.java
+│   │   │   └── service/LedgerService.java
+│   │   └── saga/
+│   │       └── service/SagaOrchestrator.java
+│   └── resources/
+│       ├── application.yml
+│       └── application-postgres.yml
+└── test/
+    └── java/com/ecommerce/platform/
+        ├── e2e/OrderCreationEndToEndTest.java
+        ├── event/KafkaEventDrivenIntegrationTest.java
+        ├── event/KafkaRetryAndDltIntegrationTest.java
+        ├── inventory/InventoryServiceTest.java
+        ├── order/OrderServiceTest.java
+        ├── payment/LedgerServiceTest.java
+        ├── postgres/PostgresIntegrationTest.java
+        └── saga/SagaOrchestrationIntegrationTest.java
 ```
 
-The H2 console is enabled for development/testing.
+---
 
-The project can later be migrated to PostgreSQL for a more production-like setup.
+## 13. Current Project Status
+
+The project is currently a **functional demonstration of core distributed-system patterns** within a modular Spring Boot backend. It provides a reliable reference implementation for asynchronous transactions, dual-write prevention, concurrency-safe inventory manipulation, double-entry financial ledgering, consumer fault tolerance, and multi-database persistence.
+
+It is not yet intended as an independently deployed, production-hardened microservice fleet.
 
 ---
 
-# Current Limitations
+## 14. Future Improvements
 
-This project currently demonstrates distributed-system patterns inside a modular monolith.
-
-It is **not yet a collection of independently deployed microservices**.
-
-Potential future improvements include:
-
-* PostgreSQL
-* Redis
-* API Gateway
-* JWT authentication
-* Resilience4j circuit breakers
-* Dead Letter Topic processing
-* More robust outbox concurrency handling
-* Prometheus metrics
-* Grafana dashboards
-* Distributed tracing
-* Dockerized application deployment
-* Independent microservice deployment
-* Stronger production-grade idempotency
-* Retry and backoff policies
-
-These features should only be documented as implemented after they actually exist in the codebase.
+The following architectural enhancements are planned as future extensions:
+- **Observability & Distributed Tracing**: OpenTelemetry instrumentation with Micrometer Tracing and Zipkin/Jaeger correlation IDs across Kafka headers.
+- **Metrics & Dashboards**: Prometheus metrics export with Grafana dashboards for consumer lag, saga latency, and outbox throughput.
+- **Authentication & Security**: Spring Security integration with JWT validation and role-based access control (RBAC).
+- **API Documentation**: OpenAPI 3 / Swagger UI specification for all endpoints.
+- **Centralized Outbox Debezium CDC**: Transitioning from scheduled polling to Change Data Capture (CDC) via Debezium and Kafka Connect.
+- **CI/CD Pipelines**: Automated GitHub Actions workflow for build, unit test, and container image generation.
 
 ---
 
-# Bug Fixes / Reliability Improvements
+## 15. Development Checkpoints
 
-Important reliability bugs that have already been addressed include:
-
-### Outbox Bug
-
-Orders were previously able to exist without a corresponding `ORDER_CREATED` outbox event.
-
-**Fixed by:** writing the order and outbox event inside the same transaction.
-
-### Account Lookup Bug
-
-The Saga could look up financial accounts using the wrong identity field.
-
-**Fixed by:** adding lookup by:
-
-```text
-userEmail + accountType
-```
-
-### Duplicate Event Processing
-
-Kafka redelivery could cause repeated Saga operations.
-
-**Fixed by:** state-based idempotency guards.
-
-### Inventory Race Condition
-
-Concurrent stock reservations could potentially oversell inventory.
-
-**Fixed by:** pessimistic database locking.
-
-### Missing End-to-End Verification
-
-Older tests could call Saga methods directly and therefore miss wiring problems.
-
-**Fixed by:** adding a real HTTP-based E2E test covering the complete event-driven workflow.
+1. `1a8d7ed` — *Fix saga payment and compensation flow*
+2. `70676fc` — *Add Kafka retry and DLT handling*
+3. `5904df6` — *Configure PostgreSQL persistence environment and integration tests*
 
 ---
 
-# Design Principles
-
-The project intentionally demonstrates the following backend engineering principles:
-
-* Separation of responsibilities
-* Transactional consistency
-* Event-driven communication
-* Eventual consistency
-* Idempotent message processing
-* Compensating transactions
-* Database concurrency control
-* Double-entry accounting
-* Asynchronous processing
-* Integration testing
-* End-to-end testing
-
----
-
-# Author
+## Author
 
 **Sarth Mishra**
-
 B.Tech Computer Science & Engineering
-
-This project is being developed as a backend/system-design focused portfolio project demonstrating practical Spring Boot and distributed-systems concepts.
