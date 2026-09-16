@@ -44,3 +44,12 @@ logging:
     com.ecommerce.platform: DEBUG
     org.springframework.kafka: INFO
     org.hibernate.SQL: DEBUG
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always

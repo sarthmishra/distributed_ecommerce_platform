@@ -26,6 +26,9 @@ public class OutboxEvent {
     @Column(columnDefinition = "TEXT", nullable = false)
     private String payload;
 
+    @Column(name = "correlation_id")
+    private String correlationId;
+
     @Column(nullable = false)
     private boolean processed = false;
 
@@ -36,10 +39,15 @@ public class OutboxEvent {
     public OutboxEvent() {}
 
     public OutboxEvent(String aggregateType, String aggregateId, String eventType, String payload) {
+        this(aggregateType, aggregateId, eventType, payload, null);
+    }
+
+    public OutboxEvent(String aggregateType, String aggregateId, String eventType, String payload, String correlationId) {
         this.aggregateType = aggregateType;
         this.aggregateId = aggregateId;
         this.eventType = eventType;
         this.payload = payload;
+        this.correlationId = correlationId;
         this.processed = false;
     }
 
@@ -48,6 +56,8 @@ public class OutboxEvent {
     public String getAggregateId() { return aggregateId; }
     public String getEventType() { return eventType; }
     public String getPayload() { return payload; }
+    public String getCorrelationId() { return correlationId; }
+    public void setCorrelationId(String correlationId) { this.correlationId = correlationId; }
     public boolean isProcessed() { return processed; }
     public void setProcessed(boolean processed) { this.processed = processed; }
     public LocalDateTime getCreatedAt() { return createdAt; }

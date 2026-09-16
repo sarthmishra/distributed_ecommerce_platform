@@ -12,8 +12,11 @@ import com.ecommerce.platform.order.repository.OrderRepository;
 import com.ecommerce.platform.outbox.service.OutboxPublisherService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -27,19 +30,22 @@ public class OrderService {
 
     private final OrderRepository orderRepository;
     private final InventoryService inventoryService;
-    // field: outboxPublisherService - writes the OrderCreatedEvent in the SAME db transaction as the order
     private final OutboxPublisherService outboxPublisherService;
-    // field: objectMapper - serializes the event to JSON for outbox storage
     private final ObjectMapper objectMapper;
+    private final Counter ordersCreatedCounter;
 
     public OrderService(OrderRepository orderRepository,
                         InventoryService inventoryService,
                         OutboxPublisherService outboxPublisherService,
-                        ObjectMapper objectMapper) {
+                        ObjectMapper objectMapper,
+                        MeterRegistry meterRegistry) {
         this.orderRepository = orderRepository;
         this.inventoryService = inventoryService;
         this.outboxPublisherService = outboxPublisherService;
         this.objectMapper = objectMapper;
+        this.ordersCreatedCounter = Counter.builder("orders.created")
+                .description("Total number of orders created")
+                .register(meterRegistry);
     }
 
     @Transactional
@@ -60,11 +66,9 @@ public class OrderService {
         );
 
         Order savedOrder = orderRepository.save(order);
+        ordersCreatedCounter.increment();
         log.info("Order created successfully: {} for customer: {}", savedOrder.getOrderNumber(), savedOrder.getCustomerEmail());
 
-        // block: write OrderCreatedEvent to the outbox table in the SAME transaction as the order save.
-        // This guarantees the event is never lost even if Kafka is down at this instant -
-        // the scheduled OutboxPublisherService.processOutboxEvents() will pick it up and publish it.
         OrderCreatedEvent event = new OrderCreatedEvent(
                 savedOrder.getOrderNumber(),
                 savedOrder.getCustomerEmail(),
@@ -72,12 +76,13 @@ public class OrderService {
                 savedOrder.getQuantity(),
                 savedOrder.getTotalAmount()
         );
+
+        String correlationId = MDC.get("correlationId");
+
         try {
             String payload = objectMapper.writeValueAsString(event);
-            outboxPublisherService.saveToOutbox("ORDER", savedOrder.getOrderNumber(), "ORDER_CREATED", payload);
+            outboxPublisherService.saveToOutbox("ORDER", savedOrder.getOrderNumber(), "ORDER_CREATED", payload, correlationId);
         } catch (JsonProcessingException ex) {
-            // if this fails, the whole @Transactional method rolls back - order + outbox row
-            // are saved atomically or not at all, which is the entire point of the outbox pattern
             throw new IllegalStateException("Failed to serialize OrderCreatedEvent for order " + orderNumber, ex);
         }
 
@@ -98,7 +103,7 @@ public class OrderService {
 
         order.setStatus(status);
         Order updatedOrder = orderRepository.save(order);
-        log.info("Updated order status for {}: {}", orderNumber, status);
+        log.info("Updated status for order {} to {}", orderNumber, status);
         return OrderResponse.fromEntity(updatedOrder);
     }
 }
