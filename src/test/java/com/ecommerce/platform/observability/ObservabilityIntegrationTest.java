@@ -13,6 +13,9 @@ import com.ecommerce.platform.outbox.repository.OutboxEventRepository;
 import com.ecommerce.platform.payment.model.Account;
 import com.ecommerce.platform.payment.model.AccountType;
 import com.ecommerce.platform.payment.service.LedgerService;
+import com.ecommerce.platform.security.dto.AuthResponse;
+import com.ecommerce.platform.security.dto.RegisterRequest;
+import com.ecommerce.platform.security.service.AuthService;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -63,8 +66,13 @@ public class ObservabilityIntegrationTest {
     @Autowired
     private MeterRegistry meterRegistry;
 
+    @Autowired
+    private AuthService authService;
+
     private static final String PRODUCT_SKU = "OBS-PHONE-01";
     private static final String CUSTOMER_EMAIL = "obs_user@example.com";
+
+    private String authToken;
 
     @BeforeEach
     void setUp() {
@@ -74,6 +82,10 @@ public class ObservabilityIntegrationTest {
 
         Account systemAccount = ledgerService.createAccount("system@settlement.com", AccountType.SYSTEM_SETTLEMENT);
         ledgerService.createAccount("merchant@store.com", AccountType.MERCHANT_REVENUE);
+
+        AuthResponse authResponse = authService.register(new RegisterRequest(CUSTOMER_EMAIL, "password123"));
+        this.authToken = authResponse.token();
+
         Account customerAccount = ledgerService.createAccount(CUSTOMER_EMAIL, AccountType.CUSTOMER_WALLET);
 
         ledgerService.recordTransfer(
@@ -94,6 +106,7 @@ public class ObservabilityIntegrationTest {
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(authToken);
         headers.set(CorrelationIdFilter.CORRELATION_ID_HEADER, expectedCorrelationId);
         HttpEntity<CreateOrderRequest> httpEntity = new HttpEntity<>(request, headers);
 
@@ -106,7 +119,6 @@ public class ObservabilityIntegrationTest {
         String orderNumber = (String) ((Map<?, ?>) response.getBody().data()).get("orderNumber");
         assertNotNull(orderNumber);
 
-        // Verify correlation ID persisted in OutboxEvent row
         await().atMost(Duration.ofSeconds(5))
                 .pollInterval(Duration.ofMillis(200))
                 .untilAsserted(() -> {
@@ -117,7 +129,6 @@ public class ObservabilityIntegrationTest {
                     assertEquals(expectedCorrelationId, outboxOpt.get().getCorrelationId(), "OutboxEvent should persist correlation ID");
                 });
 
-        // Await until Saga completes order flow to COMPLETED
         await().atMost(Duration.ofSeconds(15))
                 .pollInterval(Duration.ofMillis(500))
                 .untilAsserted(() -> {
@@ -125,7 +136,6 @@ public class ObservabilityIntegrationTest {
                     assertEquals(OrderStatus.COMPLETED, order.status());
                 });
 
-        // Verify Micrometer metrics counters
         double ordersCreated = meterRegistry.find("orders.created").counter() != null
                 ? meterRegistry.find("orders.created").counter().count() : 0;
         double outboxProcessed = meterRegistry.find("outbox.processed").counter() != null

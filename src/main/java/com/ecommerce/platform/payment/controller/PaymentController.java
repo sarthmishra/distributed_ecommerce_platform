@@ -13,6 +13,9 @@ import com.ecommerce.platform.payment.service.LedgerService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 
 import java.math.BigDecimal;
@@ -46,7 +49,15 @@ public class PaymentController {
     public ResponseEntity<ApiResponse<BigDecimal>> getBalance(@PathVariable String accountNumber) {
         Account account = accountRepository.findByAccountNumber(accountNumber)
                 .orElseThrow(() -> new ResourceNotFoundException("Account not found: " + accountNumber));
-        
+
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        if (auth != null && auth.isAuthenticated() && !"anonymousUser".equals(auth.getPrincipal())) {
+            boolean isAdmin = auth.getAuthorities().stream().anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN"));
+            if (!isAdmin && !account.getUserEmail().equalsIgnoreCase(auth.getName())) {
+                throw new AccessDeniedException("Access denied: You do not own this account");
+            }
+        }
+
         BigDecimal balance = ledgerService.calculateAccountBalance(account);
         return ResponseEntity.ok(ApiResponse.success("Balance retrieved successfully", balance));
     }
@@ -56,7 +67,6 @@ public class PaymentController {
             @RequestHeader(value = "X-Idempotency-Key", required = false) String idempotencyKey,
             @Valid @RequestBody TransferRequest request) {
 
-        // Handle Idempotency check if key provided
         if (idempotencyKey != null && !idempotencyKey.isBlank()) {
             Optional<IdempotentRecord> existingRecord = idempotencyService.getRecord(idempotencyKey);
             if (existingRecord.isPresent()) {
@@ -76,7 +86,6 @@ public class PaymentController {
 
         String successMessage = "Transfer successful with transaction ID: " + journalEntry.getTransactionId();
 
-        // Save Idempotency record if key provided
         if (idempotencyKey != null && !idempotencyKey.isBlank()) {
             idempotencyService.saveRecord(idempotencyKey, request.toString(), 200, journalEntry.getTransactionId());
         }
