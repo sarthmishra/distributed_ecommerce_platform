@@ -483,23 +483,62 @@ src/
 
 ---
 
-## 13. Current Project Status
+## 13. Security, OpenAPI & Observability
 
-The project is currently a **functional demonstration of core distributed-system patterns** within a modular Spring Boot backend. It provides a reliable reference implementation for asynchronous transactions, dual-write prevention, concurrency-safe inventory manipulation, double-entry financial ledgering, consumer fault tolerance, and multi-database persistence.
-
-It is not yet intended as an independently deployed, production-hardened microservice fleet.
+- **Authentication & Authorization**: Spring Security with stateless Bearer JWT token validation, BCrypt password hashing, `ROLE_CUSTOMER` / `ROLE_ADMIN` RBAC, and strict resource ownership checks (`Order`, `Account`).
+- **OpenAPI 3.0 & Swagger UI**: Interactive API documentation generated via Springdoc WebMVC UI with Bearer JWT security scheme.
+  - **Swagger UI**: `http://localhost:8080/swagger-ui/index.html`
+  - **OpenAPI JSON Spec**: `http://localhost:8080/v3/api-docs`
+- **Correlation ID Tracing**: Request correlation tracking via `X-Correlation-ID` header, propagated through `MDC` into log statements and persisted into `OutboxEvent` metadata.
+- **Production Metrics**: Micrometer counter and timer instrumentation tracking order creation, outbox publishing, and saga execution metrics exported at `GET /actuator/metrics`.
 
 ---
 
-## 14. Future Improvements
+## 14. Production Deployment & Operations
 
-The following architectural enhancements are planned as future extensions:
-- **Observability & Distributed Tracing**: OpenTelemetry instrumentation with Micrometer Tracing and Zipkin/Jaeger correlation IDs across Kafka headers.
-- **Metrics & Dashboards**: Prometheus metrics export with Grafana dashboards for consumer lag, saga latency, and outbox throughput.
-- **Authentication & Security**: Spring Security integration with JWT validation and role-based access control (RBAC).
-- **API Documentation**: OpenAPI 3 / Swagger UI specification for all endpoints.
-- **Centralized Outbox Debezium CDC**: Transitioning from scheduled polling to Change Data Capture (CDC) via Debezium and Kafka Connect.
-- **CI/CD Pipelines**: Automated GitHub Actions workflow for build, unit test, and container image generation.
+### Prerequisites
+* **Java**: JDK 21+
+* **Build Tool**: Apache Maven 3.9+
+* **Containers**: Docker Desktop / Docker Engine with Docker Compose v2+
+
+### Environment Variables & Configuration
+
+| Variable | Description | Local Default | Production Example |
+| :--- | :--- | :--- | :--- |
+| `KAFKA_BOOTSTRAP_SERVERS` | Kafka broker bootstrap list | `localhost:9092` | `kafka:29092` |
+| `JWT_SECRET` | HMAC-SHA256 256-bit secret key | Default 64-hex dev key | `${SECURE_ENV_JWT_SECRET}` |
+| `JWT_EXPIRATION_MS` | JWT token lifetime (ms) | `86400000` (24 hours) | `3600000` (1 hour) |
+| `SPRING_DATASOURCE_URL` | PostgreSQL connection URL | `jdbc:postgresql://127.0.0.1:5432/postgres` | `jdbc:postgresql://postgres:5432/ecommercedb` |
+| `SPRING_DATASOURCE_USERNAME` | Database user | `postgres` | `${DB_USER}` |
+| `SPRING_DATASOURCE_PASSWORD` | Database password | `postgres` | `${DB_PASSWORD}` |
+| `SPRING_JPA_SHOW_SQL` | Toggle Hibernate SQL query logging | `false` | `false` |
+
+### Running the Stack with Docker Compose
+
+To build the Spring Boot application container and launch the complete multi-service stack:
+```bash
+docker compose up --build -d
+```
+
+#### Services Started
+* **`app`**: Spring Boot API container (`http://localhost:8080`)
+* **`postgres`**: PostgreSQL 16 database (`localhost:5432`)
+* **`kafka`**: Apache Kafka broker (`localhost:9092` / `kafka:29092`)
+* **`zookeeper`**: Apache Zookeeper service (`localhost:2181`)
+* **`redis`**: Redis 7 cache (`localhost:6379`)
+
+### Operations & Health Probes
+
+* **Health Endpoint**: `GET http://localhost:8080/actuator/health` (Returns `{"status":"UP"}`)
+* **Metrics Endpoint**: `GET http://localhost:8080/actuator/metrics` (Requires `ROLE_ADMIN` authentication)
+* **Swagger UI**: `GET http://localhost:8080/swagger-ui/index.html`
+
+### Executing Automated Tests
+
+To run the complete automated test suite (42 unit, integration, embedded Kafka, PostgreSQL, security, and OpenAPI tests):
+```bash
+mvn clean test
+```
 
 ---
 
@@ -508,6 +547,9 @@ The following architectural enhancements are planned as future extensions:
 1. `1a8d7ed` — *Fix saga payment and compensation flow*
 2. `70676fc` — *Add Kafka retry and DLT handling*
 3. `5904df6` — *Configure PostgreSQL persistence environment and integration tests*
+4. `912540b` — *Update project README documentation*
+5. `c561827` — *Add observability and correlation ID tracing*
+6. `08ff3cf` — *Add Spring Security JWT authentication and authorization*
 
 ---
 

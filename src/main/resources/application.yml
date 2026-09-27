@@ -20,13 +20,13 @@ spring:
     database-platform: org.hibernate.dialect.H2Dialect
     hibernate:
       ddl-auto: update
-    show-sql: true
+    show-sql: ${SPRING_JPA_SHOW_SQL:false}
     properties:
       hibernate:
         format_sql: true
 
   kafka:
-    bootstrap-servers: localhost:9092
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
@@ -41,9 +41,9 @@ spring:
 
 logging:
   level:
-    com.ecommerce.platform: DEBUG
+    com.ecommerce.platform: INFO
     org.springframework.kafka: INFO
-    org.hibernate.SQL: DEBUG
+    org.hibernate.SQL: WARN
 
 management:
   endpoints:
@@ -52,8 +52,8 @@ management:
         include: health,info,metrics
   endpoint:
     health:
-      show-details: always
+      show-details: when-authorized
 
 jwt:
   secret: ${JWT_SECRET:404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970}
-  expiration: 86400000
+  expiration: ${JWT_EXPIRATION_MS:86400000}
